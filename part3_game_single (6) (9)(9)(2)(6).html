@@ -30048,6 +30048,11 @@ window.TU;
                 }
               }
             } catch(e){console.warn('[Catch]',e);}
+            // PIPELINE: Run any registered postFx pipeline stages after all wrapper effects
+            // This is the outermost applyPostFX wrapper, so pipeline stages run last
+            if (typeof this._runPostFxPipeline === 'function') {
+              this._runPostFxPipeline(time, depth01, reducedMotion);
+            }
           };
         }
         if (Renderer && Renderer.prototype && !Renderer.prototype.__cloudBiomeSkyInstalled) {
