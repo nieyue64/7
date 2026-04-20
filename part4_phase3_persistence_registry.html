@@ -30048,11 +30048,6 @@ window.TU;
                 }
               }
             } catch(e){console.warn('[Catch]',e);}
-            // PIPELINE: Run any registered postFx pipeline stages after all wrapper effects
-            // This is the outermost applyPostFX wrapper, so pipeline stages run last
-            if (typeof this._runPostFxPipeline === 'function') {
-              this._runPostFxPipeline(time, depth01, reducedMotion);
-            }
           };
         }
         if (Renderer && Renderer.prototype && !Renderer.prototype.__cloudBiomeSkyInstalled) {
@@ -37241,95 +37236,6 @@ window.addEventListener("load", () => {
     if (s && s.diffs && (!s._diffMap || !s._diffChunks)) decodeDiffToMaps(s);
     return _origApplyToWorld ? _origApplyToWorld.call(this, world, s || saveObj) : void 0;
   };
-})();
-
-/**
- * ============================================================================
- * ARCHITECTURE HEALTH CHECK & VALIDATION
- * ============================================================================
- * Runs on game:init:post to verify all refactored systems are working.
- * Reports to console and GlobalErrorBoundary.
- */
-(function() {
-  'use strict';
-  const checks = [];
-  function check(name, fn) { checks.push({ name, fn }); }
-
-  // Phase 0: Safety Net
-  check('GlobalErrorBoundary exists', () => !!window.GlobalErrorBoundary);
-  check('GlobalErrorBoundary.isHealthy()', () => window.GlobalErrorBoundary && window.GlobalErrorBoundary.isHealthy());
-  check('TU.Safe.runAsync exists', () => !!(window.TU && window.TU.Safe && window.TU.Safe.runAsync));
-  check('PerformanceBaseline active', () => !!window.__TU_PERF_BASELINE__);
-  check('CanvasOptimizer available', () => !!window.CanvasOptimizer);
-
-  // Phase 1: Native Integration
-  check('game:init:post not double-fired', () => {
-    // If we reach here, init has fired. The patch guard should be set.
-    const G = window.TU && window.TU.Game;
-    return !G || !G.prototype || !!G.prototype.__tuGameReadyEvent;
-  });
-
-  // Phase 2: Pipeline
-  check('Renderer.postFxPipeline available', () => {
-    const r = window.AppServices && window.AppServices.get('renderer');
-    return !r || Array.isArray(r.postFxPipeline);
-  });
-  check('game.weather single source', () => {
-    const g = window.AppServices && window.AppServices.get('game');
-    return !g || (g.weather && typeof g.weather.type === 'string');
-  });
-  check('weatherFx service registered', () => {
-    return !!window.AppServices.get('weatherFx');
-  });
-
-  // Phase 3: Persistence
-  check('BlockRegistry exists', () => !!window.BlockRegistry);
-  check('BlockRegistry has BLOCK entries', () => window.BlockRegistry && window.BlockRegistry.size() > 100);
-  check('BlockRegistry has dynamic blocks', () => {
-    const BR = window.BlockRegistry;
-    return BR && BR.getId('WIRE_OFF') !== undefined;
-  });
-  check('StorageAdapter exists', () => !!window.StorageAdapter);
-  check('Save payload includes palette', () => {
-    // Verified by structure; actual test needs a save to exist
-    return !!window.BlockRegistry && typeof window.BlockRegistry.getPalette === 'function';
-  });
-
-  // Phase 4: Console Zero Fatal Errors
-  check('Zero fatal errors', () => {
-    return window.GlobalErrorBoundary ? window.GlobalErrorBoundary.getCounts().fatal === 0 : true;
-  });
-
-  function runChecks() {
-    let passed = 0, failed = 0, total = checks.length;
-    const failures = [];
-    for (const c of checks) {
-      try {
-        if (c.fn()) { passed++; }
-        else { failed++; failures.push(c.name); }
-      } catch (e) {
-        failed++;
-        failures.push(c.name + ' (threw: ' + e.message + ')');
-      }
-    }
-    const status = failed === 0 ? 'PASS' : 'PARTIAL';
-    console.info(`[ArchHealthCheck] ${status}: ${passed}/${total} checks passed`);
-    if (failures.length) {
-      console.warn('[ArchHealthCheck] Failed checks:', failures);
-    }
-    // Store results for external inspection
-    window.__TU_ARCH_HEALTH__ = { status, passed, failed, total, failures, timestamp: Date.now() };
-    return { status, passed, failed, total, failures };
-  }
-
-  // Run after game initializes
-  if (window.GameEvents && window.GameEvents.on) {
-    window.GameEvents.on('game:init:post', () => {
-      setTimeout(runChecks, 2000); // Allow all patches to settle
-    });
-  }
-  // Also expose for manual testing
-  window.__TU_runHealthCheck = runChecks;
 })();
 
 </script>

@@ -9565,9 +9565,7 @@ class SaveSystem {
       },
       w: world.w,
       h: world.h,
-      diffs: SaveSystem._encodeDiff(this.diff, world.w),
-      // PALETTE MAPPING: Store name->ID map in save header to detect ID drift on load
-      blockPalette: window.BlockRegistry ? window.BlockRegistry.getPalette() : null
+      diffs: SaveSystem._encodeDiff(this.diff, world.w)
     };
     let serialized;
     try {
@@ -9588,28 +9586,6 @@ class SaveSystem {
   }
   applyToWorld(world, save) {
     if (!world || !save) return;
-    // PALETTE REMAPPING: If save contains a blockPalette, check for ID drift and remap
-    if (save.blockPalette && window.BlockRegistry) {
-      const remap = window.BlockRegistry.buildRemapTable(save.blockPalette);
-      if (remap) {
-        console.warn('[SaveSystem] Block ID drift detected, remapping:', remap);
-        // Remap diff entries
-        if (save._diffMap) {
-          for (const [k, oldId] of save._diffMap.entries()) {
-            const newId = remap[oldId];
-            if (newId !== undefined) save._diffMap.set(k, newId);
-          }
-        }
-        // Remap inventory item IDs
-        if (save.player && Array.isArray(save.player.inventory)) {
-          for (const slot of save.player.inventory) {
-            if (slot && typeof slot.id === 'number' && remap[slot.id] !== undefined) {
-              slot.id = remap[slot.id];
-            }
-          }
-        }
-      }
-    }
     if (!save._diffMap) return;
     let appliedCount = 0;
     const WATER = window.BLOCK && window.BLOCK.WATER || 27,
@@ -10374,171 +10350,6 @@ const CONFIG = Object.freeze({
   });
 // Block IDs 0-161: frozen constants enable V8 optimization, stable IDs for serialization/networking
 window.Constants = Constants;
-
-/**
- * @class BlockRegistry
- * @description Centralized block ID registry with palette mapping.
- * Solves the "ID drifting" problem where dynamically allocated block IDs
- * (e.g., WIRE_OFF=200, PUMP_IN=206) could change if patch load order changes,
- * corrupting old saves.
- *
- * ARCHITECTURE:
- * - Maintains a name->ID and ID->name bidirectional map
- * - On save: writes a "palette" (name->ID mapping) into the save header
- * - On load: reads the palette and remaps any blocks whose IDs have shifted
- * - All dynamic block registration goes through BlockRegistry.register()
- */
-window.BlockRegistry = (function() {
-  const _nameToId = new Map();
-  const _idToName = new Map();
-  let _nextDynamicId = 200;
-  let _frozen = false;
-
-  // Initialize from the frozen BLOCK constants
-  function initFromBlock(blockObj) {
-    for (const [name, id] of Object.entries(blockObj)) {
-      _nameToId.set(name, id);
-      _idToName.set(id, name);
-      if (id >= _nextDynamicId) _nextDynamicId = id + 1;
-    }
-  }
-
-  // Register a dynamic block (e.g., from patches)
-  function register(name, preferredId) {
-    if (_nameToId.has(name)) return _nameToId.get(name);
-    const id = Number.isFinite(preferredId) && !_idToName.has(preferredId)
-      ? preferredId
-      : _nextDynamicId++;
-    _nameToId.set(name, id);
-    _idToName.set(id, name);
-    if (id >= _nextDynamicId) _nextDynamicId = id + 1;
-    return id;
-  }
-
-  // Get the current palette (for save headers)
-  function getPalette() {
-    const palette = {};
-    for (const [name, id] of _nameToId) palette[name] = id;
-    return palette;
-  }
-
-  // Remap world tiles from a saved palette to the current palette
-  function buildRemapTable(savedPalette) {
-    const remap = {};
-    let hasChanges = false;
-    for (const [name, oldId] of Object.entries(savedPalette)) {
-      const newId = _nameToId.get(name);
-      if (newId !== undefined && newId !== oldId) {
-        remap[oldId] = newId;
-        hasChanges = true;
-      }
-    }
-    return hasChanges ? remap : null;
-  }
-
-  // Apply remap to a flat tile array
-  function applyRemap(tiles, remap) {
-    if (!remap || !tiles) return 0;
-    let changed = 0;
-    for (let i = 0, len = tiles.length; i < len; i++) {
-      const newId = remap[tiles[i]];
-      if (newId !== undefined) { tiles[i] = newId; changed++; }
-    }
-    return changed;
-  }
-
-  function getId(name) { return _nameToId.get(name); }
-  function getName(id) { return _idToName.get(id); }
-  function size() { return _nameToId.size; }
-
-  // Initialize from BLOCK
-  initFromBlock(BLOCK);
-
-  return {
-    register, getPalette, buildRemapTable, applyRemap,
-    getId, getName, size,
-    _nameToId, _idToName
-  };
-})();
-
-/**
- * @class StorageAdapter
- * @description Unified storage interface with explicit degradation flow:
- * LocalStorage -> IndexedDB -> Lite (minimal save).
- * 
- * ARCHITECTURE:
- * - Replaces scattered idb.get/set/del calls with a single interface
- * - Surfaces real errors (QuotaExceeded, SecurityError) instead of swallowing
- * - Reports storage health via getStatus()
- */
-window.StorageAdapter = (function() {
-  const STATUS = { OK: 'ok', DEGRADED: 'degraded', FAILED: 'failed' };
-  let _status = STATUS.OK;
-  let _lastError = null;
-  let _idbAvailable = null; // null = unknown, true/false after probe
-
-  async function probeIDB() {
-    if (_idbAvailable !== null) return _idbAvailable;
-    try {
-      if (!("indexedDB" in window)) { _idbAvailable = false; return false; }
-      const req = indexedDB.open("__tu_probe__", 1);
-      await new Promise((resolve, reject) => {
-        req.onsuccess = () => { req.result.close(); resolve(); };
-        req.onerror = reject;
-      });
-      indexedDB.deleteDatabase("__tu_probe__");
-      _idbAvailable = true;
-    } catch (e) {
-      _idbAvailable = false;
-      console.warn('[StorageAdapter] IDB probe failed:', e);
-    }
-    return _idbAvailable;
-  }
-
-  function writeLS(key, value) {
-    try {
-      const serialized = typeof value === 'string' ? value : JSON.stringify(value);
-      localStorage.setItem(key, serialized);
-      return true;
-    } catch (e) {
-      _lastError = e;
-      if (e.name === 'QuotaExceededError') {
-        _status = STATUS.DEGRADED;
-        console.error('[StorageAdapter] LocalStorage quota exceeded:', e);
-        if (window.GlobalErrorBoundary) {
-          window.GlobalErrorBoundary.report(e, 'error', { source: 'StorageAdapter.writeLS', details: key });
-        }
-      }
-      return false;
-    }
-  }
-
-  function readLS(key) {
-    try {
-      return localStorage.getItem(key);
-    } catch (e) {
-      _lastError = e;
-      return null;
-    }
-  }
-
-  function removeLS(key) {
-    try { localStorage.removeItem(key); return true; } catch { return false; }
-  }
-
-  function getStatus() {
-    return { status: _status, idbAvailable: _idbAvailable, lastError: _lastError };
-  }
-
-  function resetStatus() { _status = STATUS.OK; _lastError = null; }
-
-  return {
-    STATUS, probeIDB, writeLS, readLS, removeLS,
-    getStatus, resetStatus,
-    get status() { return _status; },
-    set status(v) { _status = v; }
-  };
-})();
 const BLOCK_DATA = {
     [BLOCK.AIR]: {
       name: "空气",
@@ -18816,14 +18627,6 @@ class Renderer {
    * @performance Initializes rendering contexts, post-processing buffers, and chunk cache
    */
   constructor(canvas) {
-    /**
-     * @property {Array} postFxPipeline - Ordered list of post-processing stages.
-     * ARCHITECTURE: Replaces the "onion model" where each patch wrapped applyPostFX.
-     * Stages execute in order: SpeedBlur(0) -> Base(10) -> Weather(20) -> Underwater(30)
-     * Each stage: { name: string, order: number, fn: (renderer, ctx, time, depth01, reducedMotion) => void }
-     */
-    this.postFxPipeline = [];
-    this._postFxPipelineSorted = false;
     window.GameEvents.on('renderer:setResolutionScale', scale => {
       if ("function" == typeof this.setResolutionScale) this.setResolutionScale(scale);
     });
@@ -21313,8 +21116,6 @@ class Renderer {
       ctx.drawImage(fvlBuf, 0, 0);
     }
     ctx.restore();
-    // Run registered pipeline stages (replaces onion-model wrapping)
-    this._runPostFxPipeline(time, depth01, reducedMotion);
     window.GameEvents && window.GameEvents.emit && window.GameEvents.emit('renderer:postFX:complete', this, time, depth01, reducedMotion);
   }
   /**
@@ -21322,46 +21123,6 @@ class Renderer {
    * @description Convenience method for applyPostFX with default parameters.
    * @param {number} time - Time of day (0-1)
    */
-  /**
-   * @method registerPostFxStage
-   * @description Registers a named post-processing stage in the linear pipeline.
-   * Replaces the "onion wrapping" pattern where each patch called prev.call(this,...).
-   * Stages are sorted by order and executed sequentially in applyPostFX.
-   * @param {string} name - Unique stage name (e.g., 'weather', 'underwater')
-   * @param {number} order - Execution order (lower = earlier). Standard orders:
-   *   0=speedBlur, 10=base, 20=weather, 30=underwater
-   * @param {Function} fn - Stage function: (renderer, ctx, time, depth01, reducedMotion) => void
-   */
-  registerPostFxStage(name, order, fn) {
-    // Remove existing stage with same name (idempotent registration)
-    this.postFxPipeline = this.postFxPipeline.filter(s => s.name !== name);
-    this.postFxPipeline.push({ name, order, fn });
-    this._postFxPipelineSorted = false;
-  }
-  /**
-   * @method _runPostFxPipeline
-   * @description Executes all registered post-FX pipeline stages in order.
-   * Called at the end of applyPostFX. This is the replacement for onion-model wrapping.
-   */
-  _runPostFxPipeline(time, depth01, reducedMotion) {
-    if (!this.postFxPipeline.length) return;
-    if (!this._postFxPipelineSorted) {
-      this.postFxPipeline.sort((a, b) => a.order - b.order);
-      this._postFxPipelineSorted = true;
-    }
-    const ctx = this.ctx;
-    for (let i = 0, len = this.postFxPipeline.length; i < len; i++) {
-      const stage = this.postFxPipeline[i];
-      try {
-        stage.fn(this, ctx, time, depth01, reducedMotion);
-      } catch (e) {
-        console.error(`[PostFX Pipeline] Stage '${stage.name}' failed:`, e);
-        if (window.GlobalErrorBoundary) {
-          window.GlobalErrorBoundary.report(e, 'error', { source: 'postFxPipeline', details: stage.name });
-        }
-      }
-    }
-  }
   postProcess(time = .5) {
     this.applyPostFX(time, 0, !1);
   }
@@ -23630,27 +23391,8 @@ class Game {
     window.GameEvents.on('inventory:addItem', (id, count) => {
       this._addToInventory(id, count);
     });
-    // SINGLE SOURCE OF TRUTH: game.weather is initialized once here, not lazily scattered.
-    // All weather patches should reference this object instead of creating their own.
-    this.weather = {
-      type: "clear", nextType: "clear",
-      intensity: 0, targetIntensity: 0, nextIntensity: 0,
-      lightning: 0,
-      acid: false,
-      _lightningNextAt: 0, _nextCycleAt: 0, _nextTransitionAt: 0
-    };
-    window.AppServices && window.AppServices.register && window.AppServices.register("weather", this.weather);
-    // SINGLE SOURCE OF TRUTH: weatherFx params used by postFX pipeline, renderer, and lighting.
-    // Previously lazily created in 4+ scattered locations. Now initialized once.
-    if (!window.AppServices.get('weatherFx')) {
-      window.AppServices.register('weatherFx', {
-        type: "clear", intensity: 0, lightning: 0,
-        shadowOpacity: 0, shadowColor: "rgb(10,5,20)",
-        postMode: "source-over", postR: 0, postG: 0, postB: 0, postA: 0
-      });
-    }
     window.GameEvents.on('weather:sync', data => {
-      const w = this.weather;
+      const w = this.weather || (this.weather = {});
       if (data.type) {
         w.type = data.type;
         w.nextType = data.type;
@@ -27702,14 +27444,13 @@ window.TU;
     BC = void 0 !== BLOCK_COLOR ? BLOCK_COLOR : null,
     BCP = void 0 !== BLOCK_COLOR_PACKED ? BLOCK_COLOR_PACKED : null,
     SD = void 0 !== SUN_DECAY ? SUN_DECAY : null,
-    // Use BlockRegistry for stable ID assignment (prevents ID drifting on save/load)
     IDS = {
-      WIRE_OFF: window.BlockRegistry ? window.BlockRegistry.register('WIRE_OFF', 200) : 200,
-      WIRE_ON: window.BlockRegistry ? window.BlockRegistry.register('WIRE_ON', 201) : 201,
-      SWITCH_OFF: window.BlockRegistry ? window.BlockRegistry.register('SWITCH_OFF', 202) : 202,
-      SWITCH_ON: window.BlockRegistry ? window.BlockRegistry.register('SWITCH_ON', 203) : 203,
-      LAMP_OFF: window.BlockRegistry ? window.BlockRegistry.register('LAMP_OFF', 204) : 204,
-      LAMP_ON: window.BlockRegistry ? window.BlockRegistry.register('LAMP_ON', 205) : 205
+      WIRE_OFF: 200,
+      WIRE_ON: 201,
+      SWITCH_OFF: 202,
+      SWITCH_ON: 203,
+      LAMP_OFF: 204,
+      LAMP_ON: 205
     };
   function addBlock(id, def) {
     if (BD[id] = def, SOLID[id] = def.solid ? 1 : 0, TRANSP[id] = def.transparent ? 1 : 0, LIQ[id] = def.liquid ? 1 : 0, BL && (BL[id] = def.light ? 0 | def.light : 0), BH && (BH[id] = def.hardness ? +def.hardness : 0), BC && (BC[id] = def.color), SD) {
@@ -29558,12 +29299,10 @@ window.TU;
             }
           } catch(e){console.warn('[Catch]',e);}
         }
-        // Use BlockRegistry for stable dynamic ID assignment
-        const BR = window.BlockRegistry;
-        IDS.PUMP_IN || (IDS.PUMP_IN = BR ? BR.register('PUMP_IN', 206) : allocId(206));
-        IDS.PUMP_OUT || (IDS.PUMP_OUT = BR ? BR.register('PUMP_OUT', 1 + (0 | IDS.PUMP_IN)) : allocId(1 + (0 | IDS.PUMP_IN)));
-        IDS.PLATE_OFF || (IDS.PLATE_OFF = BR ? BR.register('PLATE_OFF', 1 + (0 | IDS.PUMP_OUT)) : allocId(1 + (0 | IDS.PUMP_OUT)));
-        IDS.PLATE_ON || (IDS.PLATE_ON = BR ? BR.register('PLATE_ON', 1 + (0 | IDS.PLATE_OFF)) : allocId(1 + (0 | IDS.PLATE_OFF)));
+        IDS.PUMP_IN || (IDS.PUMP_IN = allocId(206));
+        IDS.PUMP_OUT || (IDS.PUMP_OUT = allocId(1 + (0 | IDS.PUMP_IN)));
+        IDS.PLATE_OFF || (IDS.PLATE_OFF = allocId(1 + (0 | IDS.PUMP_OUT)));
+        IDS.PLATE_ON || (IDS.PLATE_ON = allocId(1 + (0 | IDS.PLATE_OFF)));
         try {
           BD[IDS.PUMP_IN] || (addBlock(IDS.PUMP_IN, {
             name: "泵(入水口)",
@@ -30048,11 +29787,6 @@ window.TU;
                 }
               }
             } catch(e){console.warn('[Catch]',e);}
-            // PIPELINE: Run any registered postFx pipeline stages after all wrapper effects
-            // This is the outermost applyPostFX wrapper, so pipeline stages run last
-            if (typeof this._runPostFxPipeline === 'function') {
-              this._runPostFxPipeline(time, depth01, reducedMotion);
-            }
           };
         }
         if (Renderer && Renderer.prototype && !Renderer.prototype.__cloudBiomeSkyInstalled) {
@@ -37241,95 +36975,6 @@ window.addEventListener("load", () => {
     if (s && s.diffs && (!s._diffMap || !s._diffChunks)) decodeDiffToMaps(s);
     return _origApplyToWorld ? _origApplyToWorld.call(this, world, s || saveObj) : void 0;
   };
-})();
-
-/**
- * ============================================================================
- * ARCHITECTURE HEALTH CHECK & VALIDATION
- * ============================================================================
- * Runs on game:init:post to verify all refactored systems are working.
- * Reports to console and GlobalErrorBoundary.
- */
-(function() {
-  'use strict';
-  const checks = [];
-  function check(name, fn) { checks.push({ name, fn }); }
-
-  // Phase 0: Safety Net
-  check('GlobalErrorBoundary exists', () => !!window.GlobalErrorBoundary);
-  check('GlobalErrorBoundary.isHealthy()', () => window.GlobalErrorBoundary && window.GlobalErrorBoundary.isHealthy());
-  check('TU.Safe.runAsync exists', () => !!(window.TU && window.TU.Safe && window.TU.Safe.runAsync));
-  check('PerformanceBaseline active', () => !!window.__TU_PERF_BASELINE__);
-  check('CanvasOptimizer available', () => !!window.CanvasOptimizer);
-
-  // Phase 1: Native Integration
-  check('game:init:post not double-fired', () => {
-    // If we reach here, init has fired. The patch guard should be set.
-    const G = window.TU && window.TU.Game;
-    return !G || !G.prototype || !!G.prototype.__tuGameReadyEvent;
-  });
-
-  // Phase 2: Pipeline
-  check('Renderer.postFxPipeline available', () => {
-    const r = window.AppServices && window.AppServices.get('renderer');
-    return !r || Array.isArray(r.postFxPipeline);
-  });
-  check('game.weather single source', () => {
-    const g = window.AppServices && window.AppServices.get('game');
-    return !g || (g.weather && typeof g.weather.type === 'string');
-  });
-  check('weatherFx service registered', () => {
-    return !!window.AppServices.get('weatherFx');
-  });
-
-  // Phase 3: Persistence
-  check('BlockRegistry exists', () => !!window.BlockRegistry);
-  check('BlockRegistry has BLOCK entries', () => window.BlockRegistry && window.BlockRegistry.size() > 100);
-  check('BlockRegistry has dynamic blocks', () => {
-    const BR = window.BlockRegistry;
-    return BR && BR.getId('WIRE_OFF') !== undefined;
-  });
-  check('StorageAdapter exists', () => !!window.StorageAdapter);
-  check('Save payload includes palette', () => {
-    // Verified by structure; actual test needs a save to exist
-    return !!window.BlockRegistry && typeof window.BlockRegistry.getPalette === 'function';
-  });
-
-  // Phase 4: Console Zero Fatal Errors
-  check('Zero fatal errors', () => {
-    return window.GlobalErrorBoundary ? window.GlobalErrorBoundary.getCounts().fatal === 0 : true;
-  });
-
-  function runChecks() {
-    let passed = 0, failed = 0, total = checks.length;
-    const failures = [];
-    for (const c of checks) {
-      try {
-        if (c.fn()) { passed++; }
-        else { failed++; failures.push(c.name); }
-      } catch (e) {
-        failed++;
-        failures.push(c.name + ' (threw: ' + e.message + ')');
-      }
-    }
-    const status = failed === 0 ? 'PASS' : 'PARTIAL';
-    console.info(`[ArchHealthCheck] ${status}: ${passed}/${total} checks passed`);
-    if (failures.length) {
-      console.warn('[ArchHealthCheck] Failed checks:', failures);
-    }
-    // Store results for external inspection
-    window.__TU_ARCH_HEALTH__ = { status, passed, failed, total, failures, timestamp: Date.now() };
-    return { status, passed, failed, total, failures };
-  }
-
-  // Run after game initializes
-  if (window.GameEvents && window.GameEvents.on) {
-    window.GameEvents.on('game:init:post', () => {
-      setTimeout(runChecks, 2000); // Allow all patches to settle
-    });
-  }
-  // Also expose for manual testing
-  window.__TU_runHealthCheck = runChecks;
 })();
 
 </script>
