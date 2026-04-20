@@ -4987,44 +4987,9 @@ window.TU = window.TU || {};
       const entry = { tag: tag || "unknown", error: e, at: Date.now() };
       errors.push(entry);
       errors.length > maxErrors && errors.splice(0, errors.length - maxErrors);
-      // Always report to console.error (never silently swallow)
-      console.error(`[TU.Safe] ${tag}:`, e);
       try {
         log(level, tag, e);
-      } catch (logErr) { console.warn('[TU.Safe.log]', logErr); }
-      // Report to GlobalErrorBoundary if available
-      if (window.GlobalErrorBoundary) {
-        window.GlobalErrorBoundary.report(e, level === 'warn' ? 'warn' : 'error', { source: 'TU.Safe.run', details: tag });
-      }
-      if (o.toastMessage) toast(o.toastMessage, o.toastMs, o.toastKey || tag, o.cooldownMs);
-      if (o.rethrow) throw e;
-      return o.fallback;
-    }
-  }
-
-  /**
-   * @function runAsync
-   * @description Async-aware version of TU.Safe.run. Catches Promise rejections
-   * that the sync version misses (Worker init, IDB writes, fetch calls).
-   * @param {string} tag - Context tag for error reporting
-   * @param {Function} asyncFn - Async function to execute
-   * @param {Object} [opts] - Same options as run()
-   * @returns {Promise<*>} Resolved value or opts.fallback on error
-   */
-  async function runAsync(tag, asyncFn, opts) {
-    try {
-      return await asyncFn();
-    } catch (e) {
-      const o = opts || {};
-      const level = o.level || "error";
-      const entry = { tag: tag || "unknown", error: e, at: Date.now() };
-      errors.push(entry);
-      errors.length > maxErrors && errors.splice(0, errors.length - maxErrors);
-      console.error(`[TU.Safe.runAsync] ${tag}:`, e);
-      try { log(level, tag, e); } catch (logErr) { console.warn('[TU.Safe.log]', logErr); }
-      if (window.GlobalErrorBoundary) {
-        window.GlobalErrorBoundary.report(e, level === 'warn' ? 'warn' : 'error', { source: 'TU.Safe.runAsync', details: tag });
-      }
+      } catch(e){console.warn('[Catch]',e);}
       if (o.toastMessage) toast(o.toastMessage, o.toastMs, o.toastKey || tag, o.cooldownMs);
       if (o.rethrow) throw e;
       return o.fallback;
@@ -5033,7 +4998,6 @@ window.TU = window.TU || {};
 
   TU.Safe = {
     run,
-    runAsync,
     toast,
     shouldFire,
     errors
@@ -5043,87 +5007,6 @@ document.getElementById('error-toggle')?.addEventListener('click', function() {
   var el = document.getElementById('error-stack');
   el && el.classList.toggle('show');
 });
-
-/**
- * @class PerformanceBaseline
- * @description Collects frame time and tick time samples, computes p95/p99 percentiles.
- * Exposed via window.__TU_PERF_BASELINE__ for diagnostics.
- * Usage: PerformanceBaseline.sample('frame', ms); PerformanceBaseline.report();
- */
-(function() {
-  const MAX_SAMPLES = 600; // ~10 seconds at 60fps
-  const buckets = {
-    frame: new Float64Array(MAX_SAMPLES),
-    tick: new Float64Array(MAX_SAMPLES),
-    render: new Float64Array(MAX_SAMPLES)
-  };
-  const cursors = { frame: 0, tick: 0, render: 0 };
-  const counts = { frame: 0, tick: 0, render: 0 };
-
-  function sample(bucket, ms) {
-    if (!buckets[bucket]) return;
-    const idx = cursors[bucket] % MAX_SAMPLES;
-    buckets[bucket][idx] = ms;
-    cursors[bucket] = idx + 1;
-    counts[bucket]++;
-  }
-
-  function percentile(bucket, p) {
-    const n = Math.min(counts[bucket] || 0, MAX_SAMPLES);
-    if (n === 0) return 0;
-    const arr = Array.from(buckets[bucket].subarray(0, n)).sort((a, b) => a - b);
-    const idx = Math.min(Math.floor(p * n / 100), n - 1);
-    return arr[idx];
-  }
-
-  function report() {
-    const r = {};
-    for (const key of Object.keys(buckets)) {
-      const n = Math.min(counts[key] || 0, MAX_SAMPLES);
-      if (n === 0) { r[key] = { samples: 0 }; continue; }
-      r[key] = {
-        samples: n,
-        p50: percentile(key, 50).toFixed(2) + 'ms',
-        p95: percentile(key, 95).toFixed(2) + 'ms',
-        p99: percentile(key, 99).toFixed(2) + 'ms',
-        max: percentile(key, 100).toFixed(2) + 'ms'
-      };
-    }
-    return r;
-  }
-
-  const PerfBaseline = { sample, percentile, report, counts, buckets };
-  window.__TU_PERF_BASELINE__ = PerfBaseline;
-  if (window.TU) window.TU.PerfBaseline = PerfBaseline;
-
-  // Hook into game events when available
-  let _lastFrameStart = 0;
-  let _lastTickStart = 0;
-  const hookEvents = () => {
-    if (!window.GameEvents || !window.GameEvents.on) {
-      setTimeout(hookEvents, 200);
-      return;
-    }
-    // Frame time: measured per RAF cycle
-    window.GameEvents.on('game:render:pre', () => { _lastFrameStart = performance.now(); });
-    window.GameEvents.on('game:render:post', () => {
-      if (_lastFrameStart > 0) sample('frame', performance.now() - _lastFrameStart);
-    });
-    // Tick time: measured per update cycle
-    window.GameEvents.on('game:update:pre', () => { _lastTickStart = performance.now(); });
-    window.GameEvents.on('game:update:post', () => {
-      if (_lastTickStart > 0) sample('tick', performance.now() - _lastTickStart);
-    });
-    // Log baselines every 30 seconds
-    setInterval(() => {
-      const r = report();
-      if (r.frame && r.frame.samples > 0) {
-        console.info('[PerfBaseline]', JSON.stringify(r));
-      }
-    }, 30000);
-  };
-  hookEvents();
-})();
 
 </script>
   <script>
@@ -5515,49 +5398,53 @@ window.Events = {
   once: function(event, cb, opts) { return window.GameEvents.once(event, cb, opts); }
 };
 
-// --- TU Canvas State Optimizer (Scoped) ---
-// ARCHITECTURE FIX: No longer hijacks HTMLCanvasElement.prototype.getContext globally.
-// Instead, CanvasOptimizer.optimize(ctx) is applied only to the game canvas context.
-// This prevents interference with third-party libraries, offscreen canvases, and debugging tools.
-window.CanvasOptimizer = {
-  /**
-   * Apply state-caching optimization to a specific 2D canvas context.
-   * Reduces redundant C++ binding calls for globalAlpha and fillStyle.
-   * @param {CanvasRenderingContext2D} ctx - The context to optimize
-   * @returns {CanvasRenderingContext2D} The same context, now optimized
-   */
-  optimize(ctx) {
-    if (!ctx || ctx.__tu_optimized) return ctx;
-    ctx.__tu_optimized = !0;
-    let currentAlpha = 1,
-      currentFill = "#000000";
-    const alphaDesc = Object.getOwnPropertyDescriptor(CanvasRenderingContext2D.prototype, "globalAlpha");
-    const fillDesc = Object.getOwnPropertyDescriptor(CanvasRenderingContext2D.prototype, "fillStyle");
-    Object.defineProperty(ctx, "globalAlpha", {
-      get() { return currentAlpha; },
-      set(val) {
-        if (currentAlpha !== val) { currentAlpha = val; alphaDesc.set.call(this, val); }
-      }
-    });
-    Object.defineProperty(ctx, "fillStyle", {
-      get() { return currentFill; },
-      set(val) {
-        if (currentFill !== val) { currentFill = val; fillDesc.set.call(this, val); }
-      }
-    });
-    const origSave = ctx.save, origRestore = ctx.restore, stateStack = [];
-    ctx.save = function () {
-      stateStack.push({ alpha: currentAlpha, fill: currentFill });
-      origSave.call(this);
-    };
-    ctx.restore = function () {
-      const state = stateStack.pop();
-      if (state) { currentAlpha = state.alpha; currentFill = state.fill; }
-      origRestore.call(this);
-    };
+// --- TU Canvas State Optimizer Injected ---
+!function () {
+  const originalGetContext = HTMLCanvasElement.prototype.getContext;
+  HTMLCanvasElement.prototype.getContext = function (type, options) {
+    const ctx = originalGetContext.call(this, type, options);
+    if ("2d" === type && ctx && !ctx.__tu_optimized) {
+      ctx.__tu_optimized = !0;
+      let currentAlpha = 1,
+        currentFill = "#000000";
+      // Override setters to prevent redundant calls to C++ bindings
+      Object.defineProperty(ctx, "globalAlpha", {
+        get: function () {
+          return currentAlpha;
+        },
+        set: function (val) {
+          currentAlpha !== val && (currentAlpha = val,
+          // Use internal setter
+          Object.getOwnPropertyDescriptor(CanvasRenderingContext2D.prototype, "globalAlpha").set.call(this, val));
+        }
+      });
+      Object.defineProperty(ctx, "fillStyle", {
+        get: function () {
+          return currentFill;
+        },
+        set: function (val) {
+          currentFill !== val && (currentFill = val, Object.getOwnPropertyDescriptor(CanvasRenderingContext2D.prototype, "fillStyle").set.call(this, val));
+        }
+      }); // Intercept save/restore to track state (optional, but complex, leaving alpha/fill is 80% of the gain)
+      const origSave = ctx.save,
+        origRestore = ctx.restore,
+        stateStack = [];
+      ctx.save = function () {
+        stateStack.push({
+          alpha: currentAlpha,
+          fill: currentFill
+        });
+        origSave.call(this);
+      };
+      ctx.restore = function () {
+        const state = stateStack.pop();
+        if (state) { currentAlpha = state.alpha; currentFill = state.fill; }
+        origRestore.call(this);
+      };
+    }
     return ctx;
-  }
-};
+  };
+}();
 // ------------------------------------------
 let __tu_rand_idx = 0;
 const __TU_RAND_LUT = new Float32Array(16384);
@@ -5759,72 +5646,13 @@ const TU_PERF = "undefined" != typeof performance && performance && "function" =
     }
   })();
     window.__TU_DEBUG__ = __TU_DEBUG__;
-    /**
-     * @function _safeOp
-     * @description Safe operation wrapper that ALWAYS logs errors to console.error
-     * and reports to ErrorReporter. Never silently swallows exceptions.
-     * @param {Function} op - Operation to execute
-     * @param {string} context - Human-readable context for error reports
-     * @returns {*} Return value of op, or undefined on error
-     */
     window._safeOp = (op, context) => {
     try {
       return op();
     } catch (e) {
-      console.error(`[TU:SafeOp] ${context || 'unknown'}:`, e);
-      global.TU_Defensive && global.TU_Defensive.ErrorReporter && global.TU_Defensive.ErrorReporter.report(e, { source: 'safeOp', details: context });
+      __TU_DEBUG__ && context && console.warn(`[TU] ${context}:`, e);
     }
   };
-    /**
-     * @function runAsync
-     * @description Async-aware error boundary. Unlike _safeOp, properly catches
-     * Promise rejections and surfaces them. Use for any async operation where
-     * silent failure would cause zombie state (e.g., IDB writes, Worker init).
-     * @param {Function} asyncFn - Async function to execute
-     * @param {string} context - Error context label
-     * @returns {Promise<*>} Resolved value or undefined on error
-     */
-    window.runAsync = async (asyncFn, context) => {
-      try {
-        return await asyncFn();
-      } catch (e) {
-        console.error(`[TU:runAsync] ${context || 'unknown'}:`, e);
-        global.TU_Defensive && global.TU_Defensive.ErrorReporter && global.TU_Defensive.ErrorReporter.report(e, { source: 'runAsync', details: context });
-        return undefined;
-      }
-    };
-    /**
-     * @class GlobalErrorBoundary
-     * @description Centralized error boundary that tracks error rates,
-     * categorizes errors by severity, and prevents silent failures.
-     */
-    window.GlobalErrorBoundary = {
-      _counts: { fatal: 0, error: 0, warn: 0 },
-      _recentErrors: [],
-      _maxRecent: 20,
-      /** Report a categorized error */
-      report(error, category = 'error', context = {}) {
-        this._counts[category] = (this._counts[category] || 0) + 1;
-        const entry = { error, category, context, ts: Date.now() };
-        this._recentErrors.push(entry);
-        if (this._recentErrors.length > this._maxRecent) this._recentErrors.shift();
-        if (category === 'fatal') {
-          console.error('[FATAL]', context.source || '', error);
-          global.TU_Defensive && global.TU_Defensive.ErrorReporter && global.TU_Defensive.ErrorReporter.report(error, context);
-        } else if (category === 'error') {
-          console.error('[ERROR]', context.source || '', error);
-          global.TU_Defensive && global.TU_Defensive.ErrorReporter && global.TU_Defensive.ErrorReporter.report(error, context);
-        } else {
-          console.warn('[WARN]', context.source || '', error);
-        }
-      },
-      /** Get error counts by category */
-      getCounts() { return { ...this._counts }; },
-      /** Get recent errors for debugging */
-      getRecent() { return [...this._recentErrors]; },
-      /** Check if system is in healthy state */
-      isHealthy() { return this._counts.fatal === 0; }
-    };
   (function () {
     const TU = window.TU || {};
     TU._createDeprecationWarning = function (name, newName, targetObj) {
@@ -18633,8 +18461,6 @@ class Renderer {
       this.ctx || (this.ctx = canvas.getContext("2d", {
         alpha: !1
       }));
-      // Apply scoped canvas optimization (replaces former global HTMLCanvasElement hijack)
-      if (this.ctx && window.CanvasOptimizer) window.CanvasOptimizer.optimize(this.ctx);
       this.ctx.imageSmoothingEnabled = !1;
     }
     window.GameEvents.on('block:written', e => this.invalidateTile(e.x, e.y));
@@ -29059,10 +28885,14 @@ window.TU;
           AudioManager = TU.AudioManager;
         if (Game && Game.prototype && !Game.prototype.__tuGameReadyEvent) {
           Game.prototype.__tuGameReadyEvent = !0;
-          // NOTE: game:init:post is already emitted by the native Game.init (line ~23913).
-          // The previous monkey-patch duplicated the event, causing double-fire on init.
-          // Fix: We no longer wrap Game.init here. The native emit is the single source of truth.
-          // If post-init setup is needed, listen to game:init:post directly.
+          const _init = Game.prototype.init;
+          "function" == typeof _init && (Game.prototype.init = async function (...args) {
+            const r = await _init.apply(this, args);
+            try {
+              window.GameEvents.emit("game:init:post", this);
+            } catch(e){console.warn('[Catch]',e);}
+            return r;
+          });
         }
         if (InputManager && InputManager.prototype && !InputManager.prototype.__tuInputSafety) {
           InputManager.prototype.__tuInputSafety = !0;
